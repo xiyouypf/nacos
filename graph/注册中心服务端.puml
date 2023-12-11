@@ -1,0 +1,168 @@
+@startuml
+'https://plantuml.com/sequence-diagram
+
+autonumber
+participant 客户端 as Client
+participant 服务端 as Server
+participant ClientOperationService as ClientOperationService
+participant ClientManager as ClientManager
+participant IpPortBasedClient as IpPortBasedClient
+participant ServiceManager as ServiceManager
+participant 定时任务线程池 as SchedulerX
+participant InstanceBeatChecker as InstanceBeatChecker
+participant EventPublisher as EventPublisher
+
+group 服务端服务注册(InstanceController#register)
+    Client->Server: 进行服务注册
+    activate Client
+    activate Server
+    Server->Server: 根据请求，构建Instance对象
+    group 构建IpPortBasedClient对象
+        Server->Server: 构建clientId(address + # + ephemeral)
+        Server->ClientManager: 构建IpPortBasedClient对象
+        activate ClientManager
+        alt EphemeralIpPortClientManager
+            ClientManager->IpPortBasedClient: 构建IpPortBasedClient对象（clientId、ephemeral）
+            activate IpPortBasedClient
+            IpPortBasedClient-->ClientManager: 返回构建的IpPortBasedClient对象
+            deactivate IpPortBasedClient
+            ClientManager->ClientManager: 将构建的IpPortBasedClient对象放入当前对象EphemeralIpPortClientManager的clients的MAP集合中
+            ClientManager->SchedulerX: 创建并启动当前Client的心跳检查任务（beatCheckTask，延迟5秒，5秒执行一次）
+        else PersistentIpPortClientManager
+            ClientManager->IpPortBasedClient: 构建IpPortBasedClient对象（clientId、ephemeral）
+            activate IpPortBasedClient
+            IpPortBasedClient-->ClientManager: 返回构建的IpPortBasedClient对象
+            deactivate IpPortBasedClient
+            ClientManager->ClientManager: 将构建的IpPortBasedClient对象放入当前对象PersistentIpPortClientManager的clients的MAP集合中
+            ClientManager->SchedulerX: 创建并启动当前Client的健康检查任务（healthCheckTaskV2，延迟5秒，5秒执行一次）
+        end
+        deactivate ClientManager
+    end
+    Server->Server: 构建Service对象（namespaceId、\ngroupName、serviceNameNoGrouped、ephemeral）
+    alt 注册临时实例
+        Server->ClientOperationService: 注册临时实例
+        activate ClientOperationService
+        ClientOperationService->ServiceManager: 获取Service（入参Service）
+        activate ServiceManager
+        ServiceManager->ServiceManager: 将Service对象放入singletonRepository中（key:service、value:service）
+        ServiceManager->EventPublisher: 发布MetadataEvent.ServiceMetadataEvent事件,存入queue队列中
+        ServiceManager->ServiceManager: 将Service对象放入namespaceSingletonMaps中\n（key:namespace、value:service）
+        ServiceManager-->ClientOperationService: 返回Service对象
+        deactivate ServiceManager
+        ClientOperationService->ClientManager: 根据clientId获取Client对象
+        activate ClientManager
+        ClientManager-->ClientOperationService: 返回Client对象
+        deactivate ClientManager
+        ClientOperationService->ClientOperationService: 根据instance对象构建InstancePublishInfo对象
+        ClientOperationService->IpPortBasedClient: 添加服务实例
+        activate IpPortBasedClient
+        IpPortBasedClient->IpPortBasedClient: 将Service、HealthCheckInstancePublishInfo放入publishers中
+        IpPortBasedClient->EventPublisher: 发布ClientEvent.ClientChangedEvent事件，放入queue中
+        ClientOperationService->IpPortBasedClient: 设置lastUpdatedTime为now
+        ClientOperationService->IpPortBasedClient: 设置revision
+        deactivate IpPortBasedClient
+        ClientOperationService->EventPublisher: 发布ClientOperationEvent.ClientRegisterServiceEvent事件，放入queue队列中
+        activate EventPublisher
+        ClientOperationService->EventPublisher: 发布MetadataEvent.InstanceMetadataEvent事件，放入queue中
+        deactivate ClientOperationService
+        deactivate EventPublisher
+    else 注册持久实例
+        Server->ClientOperationService: 注册持久实例
+        activate ClientOperationService
+        ClientOperationService->ServiceManager: 获取Service（入参Service）
+        activate ServiceManager
+        ServiceManager->ServiceManager: 将Service对象放入singletonRepository中（key:service、value:service）
+        ServiceManager->EventPublisher: 发布MetadataEvent.ServiceMetadataEvent事件,存入queue队列中
+        ServiceManager->ServiceManager: 将Service对象放入namespaceSingletonMaps中\n（key:namespace、value:service）
+        ServiceManager-->ClientOperationService: 返回Service对象
+        deactivate ServiceManager
+        ClientOperationService->ClientOperationService: 构建WriteRequest请求
+        ClientOperationService->ClientOperationService: 调用CPProtocol协议写磁盘，同步数据提交
+        deactivate ClientOperationService
+    end
+    Server->EventPublisher: 发布RegisterInstanceTraceEvent事件，放入queue中
+    Server-->Client: 返回服务注册结果"ok"
+    deactivate Server
+    deactivate Client
+end
+
+group 服务端临时实例接收ephemeral心跳(InstanceController#beat)
+    Client->Server: 发送心跳包
+    activate Client
+    activate Server
+    Server->Server: 构建Service对象（namespaceId、groupName、serviceNameNoGrouped、ephemeral）
+    Server->Server:组装clientId（ip:port#true）
+    Server->ClientManager: 根据clientId获取Client对象
+    activate ClientManager
+    ClientManager-->Server: 返回Client对象
+    deactivate ClientManager
+    alt client为null 或 client中publishers不包括Server
+        Server->Server: Server->Server: 根据客户端心跳包，构建Instance对象
+        Server->Server: 走上述服务端服务注册路径，进行服务注册
+        Server->ClientManager: 根据clientId获取Client对象
+        activate ClientManager
+        ClientManager-->Server: 返回Client对象
+        deactivate ClientManager
+    end
+    Server->Server: 创建心跳处理器ClientBeatProcessorV2（namespaceId, clientBeat, client）
+    Server->SchedulerX: 将处理器丢到线程池中，立即执行
+    activate SchedulerX
+    SchedulerX->IpPortBasedClient: 从publishers根据service获取HealthCheckInstancePublishInfo
+    activate IpPortBasedClient
+    IpPortBasedClient-->SchedulerX: 返回HealthCheckInstancePublishInfo对象
+    deactivate IpPortBasedClient
+    SchedulerX-> SchedulerX: 更新HealthCheckInstancePublishInfo最后心跳时间为now
+    alt HealthCheckInstancePublishInfo为不健康
+        SchedulerX->SchedulerX: 设置HealthCheckInstancePublishInfo的健康状态为健康
+        SchedulerX->EventPublisher: 发布ServiceEvent.ServiceChangedEvent事件
+        activate EventPublisher
+        SchedulerX->EventPublisher: 发布ClientEvent.ClientChangedEvent事件
+        SchedulerX->EventPublisher: 发布HealthStateChangeTraceEvent事件
+        deactivate EventPublisher
+    end
+    deactivate SchedulerX
+    Server->IpPortBasedClient: 设置Client的最后更新时间为now
+    Server-->Client: 返回心跳结果
+    deactivate Server
+    deactivate Client
+end
+
+group 异步执行服务检查定时任务（ClientBeatProcessorV2、健康检查、过期检查）
+    SchedulerX->IpPortBasedClient: 从publishers中获取所有的服务
+    activate SchedulerX
+    activate IpPortBasedClient
+    IpPortBasedClient-->SchedulerX: 返回所有的服务对象
+    deactivate IpPortBasedClient
+    Loop 所有的服务对象
+        SchedulerX->IpPortBasedClient: 根据当前服务对象（service）去publishers中查找对应的健康检查实例信息对象（HealthCheckInstancePublishInfo）
+        activate IpPortBasedClient
+        IpPortBasedClient-->SchedulerX: 返回健康检查实例信息对象（HealthCheckInstancePublishInfo）
+        deactivate IpPortBasedClient
+        SchedulerX->InstanceBeatChecker: 调用非健康实例检查器检查实例是否健康
+        activate InstanceBeatChecker
+        alt 当前时间-实例的上一次心跳时间 > 心跳超时时间（默认15秒）
+            InstanceBeatChecker->InstanceBeatChecker: 设置健康检查实例信息对象为不健康
+            InstanceBeatChecker->EventPublisher: 发布ServiceEvent.ServiceChangedEvent事件
+            activate EventPublisher
+            InstanceBeatChecker->EventPublisher: 发布ClientEvent.ClientChangedEvent事件
+            InstanceBeatChecker->EventPublisher: 发布HealthStateChangeTraceEvent事件
+            deactivate EventPublisher
+        end
+        SchedulerX->InstanceBeatChecker: 调用过期实例检查起检查实例是否过期
+        alt 当前时间-实例的上一次心跳时间 > 删除IP时间（默认30秒）
+            InstanceBeatChecker->IpPortBasedClient: 删除publishers中的当前service实例
+            activate IpPortBasedClient
+            IpPortBasedClient->EventPublisher: 发布ClientEvent.ClientChangedEvent事件
+            IpPortBasedClient-->InstanceBeatChecker: 返回删除服务实例结果
+            deactivate IpPortBasedClient
+            InstanceBeatChecker->EventPublisher: 发布ClientOperationEvent.ClientDeregisterServiceEvent事件
+            activate EventPublisher
+            InstanceBeatChecker->EventPublisher: 发布MetadataEvent.InstanceMetadataEvent事件
+            InstanceBeatChecker->EventPublisher: 发布DeregisterInstanceTraceEvent事件
+            deactivate EventPublisher
+        end
+        deactivate InstanceBeatChecker
+    deactivate SchedulerX
+    end
+end
+@enduml

@@ -1,0 +1,165 @@
+@startuml
+'https://plantuml.com/sequence-diagram
+
+autonumber
+participant 调用方 as Client
+participant NotifyCenter as NotifyCenter
+participant DefaultPublisher as DefaultPublisher
+participant Subscriber as Subscriber
+
+group NotifyCenter静态代码
+    Client->NotifyCenter: 调用任意方法
+    activate Client
+    activate NotifyCenter
+    NotifyCenter->NotifyCenter: 创建当前INSTANCE实例对象
+    NotifyCenter->NotifyCenter: 创建DEFAULT_PUBLISHER_FACTORY发布者实例工厂，用于后面创建DefaultPublisher对象
+    NotifyCenter->DefaultPublisher: 创建DefaultSharePublisher实例
+    activate DefaultPublisher
+    DefaultPublisher-->NotifyCenter: 返回DefaultSharePublisher实例
+    deactivate DefaultPublisher
+    NotifyCenter->NotifyCenter: 设置 INSTANCE.sharePublisher 的值为DefaultSharePublisher实例
+    NotifyCenter->DefaultPublisher: 初始化并启动INSTANCE.sharePublisher线程
+    NotifyCenter->NotifyCenter: 添加NotifyCenter关闭钩子函数NotifyCenter::shutdown
+    deactivate NotifyCenter
+    deactivate Client
+end
+
+group 注册事件到发布者（NotifyCenter#registerToPublisher）
+    Client->NotifyCenter: 注册一个事件到Publisher
+    activate Client
+    activate NotifyCenter
+    alt SlowEvent
+        NotifyCenter-->Client: 返回sharePublisher
+    end
+    NotifyCenter->NotifyCenter: 根据eventType获取topic（eventType全路径名称）
+    alt publisherMap中没有topic对应的Publisher
+        NotifyCenter->DefaultPublisher: 创建一个DefaultPublisher
+        activate DefaultPublisher
+        DefaultPublisher-->NotifyCenter: 返回创建的DefaultPublisher
+        deactivate DefaultPublisher
+        NotifyCenter->NotifyCenter: 将topic和创建的DefaultPublisher放入publisherMap\n中（key:topic、val:DefaultPublisher）
+    end
+    NotifyCenter-->Client: 返回Topic对应的Publisher
+    deactivate NotifyCenter
+    deactivate Client
+end
+
+group 注册订阅者（NotifyCenter#registerSubscriber）
+    Client->NotifyCenter: 注册一个订阅者
+    activate Client
+    activate NotifyCenter
+    alt SmartSubscriber
+        loop 订阅者订阅的事件集合
+            alt SlowEvent
+                NotifyCenter->DefaultPublisher: 添加订阅者到sharePublisher的subscribers集合中
+                activate DefaultPublisher
+                NotifyCenter->DefaultPublisher: 添加订阅者到subMappings中（key:SlowEvent、val:Set<Subscriber>>）
+                deactivate DefaultPublisher
+            else 非SlowEvent
+                group 添加订阅者
+                    NotifyCenter->NotifyCenter: 根据subscribeType获取topic（subscribeType全路径名称）
+                    alt publisherMap中没有topic对应的Publisher
+                        NotifyCenter->DefaultPublisher: 创建一个DefaultPublisher
+                        activate DefaultPublisher
+                        DefaultPublisher-->NotifyCenter: 返回创建的DefaultPublisher
+                        deactivate DefaultPublisher
+                        NotifyCenter->NotifyCenter: 将topic和创建的DefaultPublisher放入publisherMap\n中（key:topic、val:DefaultPublisher）
+                    end
+                    NotifyCenter->NotifyCenter: 根据topic获取对应的Publisher
+                    alt publisher为ShardedEventPublisher类型
+                        NotifyCenter->DefaultPublisher: 添加订阅者到subscribers集合中
+                        activate DefaultPublisher
+                        NotifyCenter->DefaultPublisher: 添加订阅者到subMappings中（key:SlowEvent、val:Set<Subscriber>>）
+                        deactivate DefaultPublisher
+                    else 非ShardedEventPublisher类型
+                        NotifyCenter->DefaultPublisher: 添加订阅者到subscribers集合中
+                    end
+                end
+            end
+        end
+        NotifyCenter-->Client: return;
+    end
+    NotifyCenter->NotifyCenter: 获取订阅者订阅的类型
+    alt SlowEvent
+        NotifyCenter->DefaultPublisher: 添加订阅者到sharePublisher的subscribers集合中
+        activate DefaultPublisher
+        NotifyCenter->DefaultPublisher: 添加订阅者到sharePublisher的subMappings中（key:SlowEvent、val:Set<Subscriber>>）
+        deactivate DefaultPublisher
+        NotifyCenter-->Client: return;
+    end
+    group 添加订阅者
+        NotifyCenter->NotifyCenter: 根据subscribeType获取topic（subscribeType全路径名称）
+        alt publisherMap中没有topic对应的Publisher
+            NotifyCenter->DefaultPublisher: 创建一个DefaultPublisher
+            activate DefaultPublisher
+            DefaultPublisher-->NotifyCenter: 返回创建的DefaultPublisher
+            deactivate DefaultPublisher
+            NotifyCenter->NotifyCenter: 将topic和创建的DefaultPublisher放入publisherMap\n中（key:topic、val:DefaultPublisher）
+        end
+        NotifyCenter->NotifyCenter: 根据topic获取对应的Publisher
+        alt publisher为ShardedEventPublisher类型
+            NotifyCenter->DefaultPublisher: 添加订阅者到subscribers集合中
+            activate DefaultPublisher
+            NotifyCenter->DefaultPublisher: 添加订阅者到subMappings中（key:SlowEvent、val:Set<Subscriber>>）
+            deactivate DefaultPublisher
+        else 非ShardedEventPublisher类型
+            NotifyCenter->DefaultPublisher: 添加订阅者到subscribers集合中
+        end
+    end
+    NotifyCenter-->Client: return;
+    deactivate NotifyCenter
+    deactivate Client
+end
+
+group 发布事件(NotifyCenter#publishEvent)
+    Client->NotifyCenter: 发布事件
+    activate Client
+    activate NotifyCenter
+    alt SlowEvent
+        NotifyCenter->DefaultPublisher: 添加事件到sharePublisher的queue中
+        activate DefaultPublisher
+        alt 添加失败
+            DefaultPublisher->Subscriber: 通知所有的订阅者
+        end
+        DefaultPublisher-->NotifyCenter: 返回添加事件结果
+        deactivate DefaultPublisher
+    end
+    NotifyCenter->NotifyCenter: 获取topic（事件的全路径名称）
+    NotifyCenter->NotifyCenter: 根据topic到publisherMap中获取publisher
+    alt 获取到的publisher不为空
+        NotifyCenter->DefaultPublisher: 添加事件到topic对应的publisher中的queue中
+        activate DefaultPublisher
+        alt 添加失败
+            DefaultPublisher->Subscriber: 通知所有的订阅者
+        end
+        DefaultPublisher-->NotifyCenter: 返回添加事件结果
+        deactivate DefaultPublisher
+    end
+    alt PluginEvent
+        NotifyCenter-->Client: 返回发布事件成功
+    end
+    NotifyCenter-->Client: 返回发布事件结果
+    deactivate DefaultPublisher
+    deactivate NotifyCenter
+    deactivate Client
+end
+
+group DefaultPublisher线程任务run方法
+    loop 死循环（当前对象没有shutdown）
+        DefaultPublisher->DefaultPublisher: 从queue中取出一个事件
+        activate DefaultPublisher
+        loop 所有的订阅者（subscribers）
+            DefaultPublisher->Subscriber: 获取订阅者的执行器Executor
+            activate Subscriber
+            Subscriber-->DefaultPublisher: 返回订阅者的执行器Executor
+            deactivate Subscriber
+            alt 执行器Executor不为空
+                DefaultPublisher->Subscriber: 使用Executor异步调用订阅者的onEvent方法
+            else 执行器Executor为空
+                DefaultPublisher->Subscriber: 同步调用订阅者的onEvent方法
+            end
+        end
+        deactivate DefaultPublisher
+    end
+end
+@enduml

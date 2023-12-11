@@ -1,0 +1,112 @@
+@startuml
+'https://plantuml.com/sequence-diagram
+
+autonumber
+participant 客户端 as Client
+participant NacosNamingService as NacosNamingService
+participant NotifyCenter as NotifyCenter
+participant DefaultPublisher as DefaultPublisher
+participant Subscriber as Subscriber
+participant NamingClientProxyDelegate as NamingClientProxyDelegate
+participant ServiceInfoHolder as ServiceInfoHolder
+participant 磁盘 as DiskCache
+participant 服务端 as Server
+
+group 构建并初始化NacosNamingService对象(NamingFactory#createNamingService)
+    Client->NacosNamingService: 创建NacosNamingService对象
+    activate Client
+    activate NacosNamingService
+    NacosNamingService->NacosNamingService: 设置namespace(入参获取)
+    NacosNamingService->NacosNamingService: 设置logName(入参获取、默认naming.log)
+    NacosNamingService->NacosNamingService: 设置notifierEventScope(UUID随机生成)
+    NacosNamingService->Subscriber:创建的InstancesChangeNotifier对象（订阅InstancesChangeEvent事件）
+    activate Subscriber
+    Subscriber-->NacosNamingService: 返回创建的InstancesChangeNotifier对象
+    deactivate Subscriber
+    NacosNamingService->NacosNamingService: 设置changeNotifier值为创建的InstancesChangeNotifier对象
+    NacosNamingService->NotifyCenter: 注册InstancesChangeEvent事件到发布者
+    activate NotifyCenter
+    NotifyCenter->DefaultPublisher: 第一次创建DefaultPublisher对象
+    activate DefaultPublisher
+    DefaultPublisher-->NotifyCenter: 返回创建的DefaultPublisher对象
+    deactivate DefaultPublisher
+    NotifyCenter-->NacosNamingService: 返回topic对应的DefaultPublisher
+    deactivate NotifyCenter
+    NacosNamingService->NotifyCenter: 注册订阅者changeNotifier(InstancesChangeNotifier)
+    NacosNamingService->NacosNamingService: 创建ServiceInfoHolder实例(namespace、\nthis.notifierEventScope、properties)
+    NacosNamingService->NamingClientProxyDelegate: 创建NamingClientProxyDelegate实例\n(namespace、serviceInfoHolder、properties、changeNotifier)
+    activate NamingClientProxyDelegate
+    NamingClientProxyDelegate->NamingClientProxyDelegate: 属性赋值，\n内部创建NamingHttpClientProxy和NamingGrpcClientProxy两个实例
+    NamingClientProxyDelegate-->NacosNamingService: 返回NamingClientProxyDelegate实例
+    deactivate NamingClientProxyDelegate
+    NacosNamingService->NacosNamingService: 设置clientProxy为创建的NamingClientProxyDelegate实例
+    NacosNamingService-->Client: 返回创建的NacosNamingService实例
+    deactivate NacosNamingService
+    deactivate Client
+end
+
+group 服务注册与注销(NamingService#registerInstance、NamingService#deregisterInstance)
+    Client->NacosNamingService: 注册服务（本质注册Instance信息）
+    activate Client
+    activate NacosNamingService
+    NacosNamingService->NacosNamingService: 检查心跳时间设置
+    NacosNamingService->NamingClientProxyDelegate: 注册服务
+    activate NamingClientProxyDelegate
+    NamingClientProxyDelegate->Server: 调用服务/nacos/v1/ns/instance接口进行服务注册
+    deactivate NamingClientProxyDelegate
+    deactivate NacosNamingService
+    deactivate Client
+    Client->NacosNamingService: 注销服务（本质注册Instance信息）
+    activate Client
+    activate NacosNamingService
+    NacosNamingService->NamingClientProxyDelegate: 注册服务
+    activate NamingClientProxyDelegate
+    NamingClientProxyDelegate->Server: 调用服务接口进行服务注册
+    deactivate NamingClientProxyDelegate
+    deactivate NacosNamingService
+    deactivate Client
+end
+
+group 服务订阅(NamingService#subscribe)
+    Client->NacosNamingService: 进行服务订阅（groupName,、serviceName、clusterString、listener）
+    activate Client
+    activate NacosNamingService
+    NacosNamingService->Subscriber: 注册监听器listener
+    activate Subscriber
+    Subscriber->Subscriber: 拼接serviceKey（groupName@@serviceName@@clusters）
+    Subscriber->Subscriber: 将监听器放入listenerMap中（key:serviceKey、val:Set<listener>）
+    deactivate Subscriber
+    NacosNamingService->NamingClientProxyDelegate: 订阅服务
+    activate NamingClientProxyDelegate
+    NamingClientProxyDelegate->NamingClientProxyDelegate: 拼接serviceKey（groupName@@serviceName@@clusters）
+    NamingClientProxyDelegate->ServiceInfoHolder: 根据serviceKey从ServiceInfoHolder中serviceInfoMap获取ServiceInfo
+    activate ServiceInfoHolder
+    ServiceInfoHolder-->NamingClientProxyDelegate: 返回服务信息ServiceInfo
+    deactivate ServiceInfoHolder
+    alt ServiceInfo为空
+        NamingClientProxyDelegate->Server: 通过grpcClientProxy调用服务订阅接口
+        activate Server
+        Server->NamingClientProxyDelegate: 返回订阅的服务信息ServiceInfo
+        deactivate Server
+    end
+    NamingClientProxyDelegate->ServiceInfoHolder: 处理服务信息ServiceInfo
+    activate ServiceInfoHolder
+    ServiceInfoHolder->ServiceInfoHolder: 拼接serviceKey
+    ServiceInfoHolder->ServiceInfoHolder: 获取旧的ServiceInfo
+    ServiceInfoHolder->ServiceInfoHolder: 将新的ServiceInfo放入serviceInfoMap中（key:serviceKey、val:ServiceInfo）
+    ServiceInfoHolder->ServiceInfoHolder: 判断新旧信息ServiceInfo是否有改变
+    alt 新旧信息ServiceInfo有变化
+        ServiceInfoHolder->NotifyCenter: 发布InstancesChangeEvent事件
+        activate NotifyCenter
+        NotifyCenter-->ServiceInfoHolder: 返回发布事件是否成功
+        deactivate NotifyCenter
+        ServiceInfoHolder->DiskCache: 写磁盘
+    end
+    ServiceInfoHolder-->NamingClientProxyDelegate: 返回新的服务信息ServiceInfo
+    deactivate ServiceInfoHolder
+    NamingClientProxyDelegate-->NacosNamingService: 返回新的服务信息ServiceInfo
+    deactivate NamingClientProxyDelegate
+    deactivate NacosNamingService
+    deactivate Client
+end
+@enduml

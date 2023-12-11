@@ -1,0 +1,145 @@
+@startuml
+'https://plantuml.com/sequence-diagram
+
+autonumber
+participant 客户端 as Client
+participant NacosConfigService as NacosConfigService
+participant ConfigFilterChainManager as ConfigFilterChainManager
+participant ServerListManager as ServerListManager
+participant ClientWorker as ClientWorker
+participant ConfigRpcTransportClient as ConfigRpcTransportClient
+participant CacheData as CacheData
+participant File as File
+participant 服务端 as Server
+
+Client->NacosConfigService: 构建NacosConfigService对象
+activate Client
+activate NacosConfigService
+NacosConfigService->NacosConfigService: 解析namespace，存储在该对象中
+NacosConfigService->ConfigFilterChainManager: 构建ConfigFilterChainManager对象
+activate ConfigFilterChainManager
+ConfigFilterChainManager->ConfigFilterChainManager: 存储initProperty对象
+ConfigFilterChainManager->ConfigFilterChainManager: 加载所有IConfigFilter类型对象(ServiceLoader方式)
+ConfigFilterChainManager->ConfigFilterChainManager: 调用init方法初始化initProperty对象
+ConfigFilterChainManager->ConfigFilterChainManager: 添加IConfigFilter对象到filters集合对象中（按照getOrder排序）
+ConfigFilterChainManager-->NacosConfigService: 返回构建的ConfigFilterChainManager对象
+deactivate ConfigFilterChainManager
+NacosConfigService->ServerListManager: 构建ServerListManager对象
+activate ServerListManager
+ServerListManager->ServerListManager: 设置serverUrls、name等属性
+ServerListManager-->NacosConfigService: 返回构建的ServerListManager对象
+deactivate ServerListManager
+NacosConfigService->ClientWorker: 构建ClientWorker对象
+activate ClientWorker
+ClientWorker->ClientWorker: 设置请求超时时间timeout为30秒
+ClientWorker->ConfigRpcTransportClient: 构建ConfigRpcTransportClient对象
+activate ConfigRpcTransportClient
+ConfigRpcTransportClient-->ClientWorker: 返回构建的ConfigRpcTransportClient对象
+deactivate ConfigRpcTransportClient
+ClientWorker->ClientWorker: 构建大小为2的线程池（一个用于登录，一个用于长轮训）
+ClientWorker->ConfigRpcTransportClient: 将线程池设置到ConfigRpcTransportClient对象中
+ClientWorker->ConfigRpcTransportClient: 启动ConfigRpcTransportClient对象
+activate ConfigRpcTransportClient
+ConfigRpcTransportClient->ConfigRpcTransportClient: 登录+定时任务登录（默认5秒）
+group 子线程执行配置监听（最多5秒一次，长轮训）
+    ConfigRpcTransportClient->ConfigRpcTransportClient: 从listenExecutebell队列中poll一个对象（5秒超时）
+    ConfigRpcTransportClient->Server: 拉取变更列表
+    activate Server
+    Server-->ConfigRpcTransportClient: 返回拉取的变更列表
+    deactivate Server
+    loop 变更列表
+        ConfigRpcTransportClient->Server: 拉取最新配置
+        activate Server
+        Server-->ConfigRpcTransportClient: 返回拉取的最新配置
+        deactivate Server
+        ConfigRpcTransportClient->ClientWorker: 通知所有的监听者
+    end
+end
+deactivate ConfigRpcTransportClient
+ClientWorker-->NacosConfigService: 返回构建的ClientWorker对象
+deactivate ClientWorker
+NacosConfigService-->Client: 返回构建的NacosConfigService对象
+deactivate NacosConfigService
+deactivate Client
+
+
+Client->NacosConfigService: 发布配置
+activate Client
+activate NacosConfigService
+NacosConfigService->ConfigFilterChainManager: 进行配置过滤
+NacosConfigService->ClientWorker: 发布配置
+activate ClientWorker
+ClientWorker->ConfigRpcTransportClient: 发布配置
+activate ConfigRpcTransportClient
+ConfigRpcTransportClient->Server: 发布配置
+activate Server
+Server-->ConfigRpcTransportClient: 返回发布配置结果
+deactivate Server
+ConfigRpcTransportClient-->ClientWorker: 返回发布配置结果
+deactivate ConfigRpcTransportClient
+ClientWorker-->NacosConfigService: 返回发布配置结果
+deactivate ClientWorker
+NacosConfigService-->Client: 返回发布配置结果
+deactivate NacosConfigService
+deactivate Client
+
+
+
+Client->NacosConfigService: 获取配置
+activate Client
+activate NacosConfigService
+NacosConfigService->File: 从本地故障转移文件读取配置
+activate File
+File-->NacosConfigService: 返回读取的配置
+deactivate File
+alt 配置不为空
+    NacosConfigService->ConfigFilterChainManager: 配置过滤
+    NacosConfigService-->Client: 返回配置
+end
+NacosConfigService->ClientWorker: 获取配置
+activate ClientWorker
+ClientWorker->ConfigRpcTransportClient: 获取配置
+activate ConfigRpcTransportClient
+ConfigRpcTransportClient->Server: 获取配置
+activate Server
+Server-->ConfigRpcTransportClient: 返回配置
+deactivate Server
+ConfigRpcTransportClient-->ClientWorker: 返回配置
+deactivate ConfigRpcTransportClient
+ClientWorker-->NacosConfigService: 返回配置
+deactivate ClientWorker
+NacosConfigService->ConfigFilterChainManager: 配置过滤
+alt 从服务端获取配置异常
+    NacosConfigService->File: 则获取本地的快照文件内容
+    activate File
+    File-->NacosConfigService: 返回快照配置
+    deactivate File
+end
+NacosConfigService-->Client: 返回配置
+deactivate NacosConfigService
+deactivate Client
+
+
+
+Client->NacosConfigService: 监听配置
+activate Client
+activate NacosConfigService
+NacosConfigService->ClientWorker: 监听配置
+activate ClientWorker
+ClientWorker->CacheData: 构建CacheData对象（dataId、group、tenant、listeners、content等）
+activate CacheData
+CacheData-->ClientWorker: 返回构建的CacheData对象
+deactivate CacheData
+ClientWorker->ClientWorker: 将CacheData放入cacheMap中
+ClientWorker->CacheData: 添加监听者
+activate CacheData
+CacheData->CacheData: 构建ManagerListenerWrap对象（listener、lastCallMd5、lastContent），放入listeners集合中
+deactivate CacheData
+ClientWorker->ConfigRpcTransportClient: 通知监听配置
+activate ConfigRpcTransportClient
+ConfigRpcTransportClient->ConfigRpcTransportClient: listenExecutebell队列中添加一个bellItem空对象
+deactivate ConfigRpcTransportClient
+deactivate ClientWorker
+deactivate NacosConfigService
+deactivate Client
+@enduml
