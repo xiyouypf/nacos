@@ -2,10 +2,9 @@
 'https://plantuml.com/sequence-diagram
 
 autonumber
+participant 客户端 as Client
+participant ConfigControllerV2 as ConfigControllerV2
 
-Alice -> Bob: Authentication Request
-Bob --> Alice: Authentication Response
+Client->ConfigControllerV2: 发布配置
 
-Alice -> Bob: Another authentication Request
-Alice <-- Bob: another authentication Response
 @enduml
